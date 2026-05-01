@@ -798,8 +798,34 @@ void http_connection::on_read(error_code const& e
 				m_sock->close(ec);
 
 				std::string url = resolve_redirect_location(m_url, location);
+
+				// Don't forward Authorization credentials to a different
+				// origin. The redirect target may be a third party server
+				// that should not see our basic-auth credentials. We require
+				// the new URL to share the "scheme://[userinfo@]host[:port]"
+				// prefix of the original URL.
+				std::string auth = m_auth;
+				if (!auth.empty())
+				{
+					auto const origin_end = [](std::string const& u) {
+						auto p = u.find("://");
+						if (p == std::string::npos) return std::string::npos;
+						auto const e = u.find_first_of("/?#", p + 3);
+						return (e == std::string::npos) ? u.size() : e;
+					};
+					auto const prefix_len = origin_end(m_url);
+					bool const same_origin = prefix_len != std::string::npos
+						&& url.size() >= prefix_len
+						&& url.compare(0, prefix_len, m_url, 0, prefix_len) == 0
+						&& (url.size() == prefix_len
+							|| url[prefix_len] == '/'
+							|| url[prefix_len] == '?'
+							|| url[prefix_len] == '#');
+					if (!same_origin) auth.clear();
+				}
+
 				get(url, m_completion_timeout, &m_proxy, m_redirects - 1
-					, m_user_agent, m_bind_addr, m_resolve_flags, m_auth
+					, m_user_agent, m_bind_addr, m_resolve_flags, auth
 #if TORRENT_USE_I2P
 					, m_i2p_conn
 #endif
