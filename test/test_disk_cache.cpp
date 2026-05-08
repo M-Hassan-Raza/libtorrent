@@ -235,7 +235,7 @@ void test_hashing_bottleneck(test_mode_t const mode)
 		, disk_cache::hash_result::post_job);
 
 	jobqueue_t aborted;
-	TEST_CHECK(f.cache.try_clear_piece(f.loc(0_piece), nullptr, aborted));
+	f.cache.clear_piece(f.loc(0_piece), aborted);
 	TEST_EQUAL(aborted.size(), 1);
 	TEST_EQUAL(int(f.cache.size()), 0);
 }
@@ -309,7 +309,7 @@ TORRENT_TEST(v2_hashing_bottleneck)
 	(void)h;
 
 	jobqueue_t aborted;
-	TEST_CHECK(f.cache.try_clear_piece(f.loc(0_piece), nullptr, aborted));
+	f.cache.clear_piece(f.loc(0_piece), aborted);
 	TEST_CHECK(aborted.empty()); // block 0's write_job was consumed by the flush
 	TEST_EQUAL(int(f.cache.size()), 0);
 	TEST_EQUAL(f.alloc.live, 0); // buffer was freed when the block was flushed
@@ -335,7 +335,7 @@ TORRENT_TEST(v2_hash2_from_cache)
 	TEST_CHECK(!h.is_all_zeros());
 
 	jobqueue_t aborted;
-	TEST_CHECK(f.cache.try_clear_piece(f.loc(0_piece), nullptr, aborted));
+	f.cache.clear_piece(f.loc(0_piece), aborted);
 	TEST_EQUAL(aborted.size(), 1); // block 0's write_job was never flushed
 	TEST_EQUAL(int(f.cache.size()), 0);
 }
@@ -351,7 +351,7 @@ TORRENT_TEST(clear_piece_v1)
 	TEST_EQUAL(int(f.cache.size()), 2);
 
 	jobqueue_t aborted;
-	TEST_CHECK(f.cache.try_clear_piece(f.loc(0_piece), nullptr, aborted));
+	f.cache.clear_piece(f.loc(0_piece), aborted);
 	TEST_EQUAL(int(f.cache.size()), 0);
 	TEST_EQUAL(aborted.size(), 2);
 }
@@ -362,7 +362,7 @@ TORRENT_TEST(clear_piece_not_in_cache)
 	cache_fixture f(1, test_mode::v1);
 
 	jobqueue_t aborted;
-	TEST_CHECK(f.cache.try_clear_piece(f.loc(0_piece), nullptr, aborted));
+	f.cache.clear_piece(f.loc(0_piece), aborted);
 	TEST_CHECK(aborted.empty());
 	TEST_EQUAL(int(f.cache.size()), 0);
 }
@@ -386,7 +386,7 @@ TORRENT_TEST(hash_failure_clear)
 
 	// Simulate hash mismatch: clear the piece before it reaches disk.
 	jobqueue_t aborted;
-	TEST_CHECK(f.cache.try_clear_piece(f.loc(0_piece), nullptr, aborted));
+	f.cache.clear_piece(f.loc(0_piece), aborted);
 	TEST_EQUAL(aborted.size(), 2);
 	TEST_EQUAL(int(f.cache.size()), 0);
 }
@@ -413,7 +413,7 @@ TORRENT_TEST(clear_piece_partially_flushed)
 	TEST_EQUAL(int(f.cache.size()), 1); // only block 1's buffer remains
 
 	jobqueue_t aborted;
-	TEST_CHECK(f.cache.try_clear_piece(f.loc(0_piece), nullptr, aborted));
+	f.cache.clear_piece(f.loc(0_piece), aborted);
 	TEST_EQUAL(int(f.cache.size()), 0);
 	TEST_EQUAL(aborted.size(), 1); // only block 1's write_job
 }
@@ -478,8 +478,7 @@ void run_flush_test(flush_test_case tc)
 	// the initial string. '!' blocks are present in the cache but skipped,
 	// simulating a callback that only partially flushes a piece.
 	f.cache.flush_to_disk(
-		[&](bitfield& flushed, span<cached_block_entry const> blocks) -> int
-		{
+		[&](bitfield& flushed, span<cached_block_entry const> blocks) -> int {
 			int count = 0;
 			for (int i = 0; i < blocks.size(); ++i)
 			{
@@ -495,8 +494,8 @@ void run_flush_test(flush_test_case tc)
 			return count;
 		},
 		tc.target,
-		[](jobqueue_t, disk_job*) {},
-		tc.optimistic);
+		tc.optimistic
+	);
 
 	for (piece_index_t const p : tc.pieces.range())
 	{

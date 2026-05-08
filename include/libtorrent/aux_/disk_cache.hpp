@@ -156,10 +156,6 @@ struct cached_piece_entry
 	// the last block, we should post this
 	disk_job* hash_job = nullptr;
 
-	// if the piece has been requested to be cleared, but it was locked
-	// (flushing) at the time. We hang this job here to complete it once the
-	// thread currently flushing is done with it
-	disk_job* clear_piece = nullptr;
 	// the exact v2 size of this piece (respecting file boundaries).
 	// Used for bytes_left computation in kick_hasher's v2 path.
 	int piece_size2;
@@ -456,12 +452,10 @@ struct TORRENT_EXTRA_EXPORT disk_cache
 		return hash_piece_result::completed;
 	}
 
-	// If the specified piece exists in the cache, and it's unlocked, clear all
-	// write jobs (return them in "aborted"). Returns true if the clear_piece
-	// job should be posted as complete. Returns false if the piece is locked by
-	// another thread, and the clear_piece job has been queued to be issued once
-	// the piece is unlocked.
-	bool try_clear_piece(piece_location const loc, disk_job* j, jobqueue_t& aborted);
+	// extract any cached write_jobs for the piece (returned in `aborted`) and
+	// reset its cached state. The caller must guarantee the piece is not mid-
+	// flush or mid-hash, typically by raising a per-storage fence first.
+	void clear_piece(piece_location loc, jobqueue_t& aborted);
 
 	template <typename Fun>
 	int get2(piece_location const loc, int const block_idx, Fun f) const
@@ -535,14 +529,15 @@ struct TORRENT_EXTRA_EXPORT disk_cache
 	// this should be called by a disk thread
 	// the callback should return the number of blocks it successfully flushed
 	// to disk
-	void flush_to_disk(std::function<int(bitfield&, span<cached_block_entry const>)> f
-		, int target_blocks
-		, std::function<void(jobqueue_t, disk_job*)> clear_piece_fun
-		, bool optimistic = false);
+	void flush_to_disk(
+		std::function<int(bitfield&, span<cached_block_entry const>)> f,
+		int target_blocks,
+		bool optimistic = false
+	);
 
-	void flush_storage(std::function<int(bitfield&, span<cached_block_entry const>)> f
-		, storage_index_t storage
-		, std::function<void(jobqueue_t, disk_job*)> clear_piece_fun);
+	void flush_storage(
+		std::function<int(bitfield&, span<cached_block_entry const>)> f, storage_index_t storage
+	);
 
 	std::size_t size() const;
 	std::size_t num_flushing() const;
@@ -571,12 +566,13 @@ private:
 	void clear_piece_impl(cached_piece_entry& cpe, jobqueue_t& aborted);
 
 	template <typename Iter, typename View>
-	Iter flush_piece_impl(View& view
-		, Iter piece_iter
-		, std::function<int(bitfield&, span<cached_block_entry const>)> const& f
-		, std::unique_lock<std::mutex>& l
-		, span<cached_block_entry> const blocks
-		, std::function<void(jobqueue_t, disk_job*)> clear_piece_fun);
+	Iter flush_piece_impl(
+		View& view,
+		Iter piece_iter,
+		std::function<int(bitfield&, span<cached_block_entry const>)> const& f,
+		std::unique_lock<std::mutex>& l,
+		span<cached_block_entry> const blocks
+	);
 
 	mutable std::mutex m_mutex;
 	std::condition_variable m_flushing_cv;

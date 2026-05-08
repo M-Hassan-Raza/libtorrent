@@ -162,8 +162,8 @@ struct cache_fixture
 				return count;
 			},
 			target,
-			[](lt::jobqueue_t, lt::aux::disk_job*) {}
-			, optimistic);
+			optimistic
+		);
 		return total;
 	}
 
@@ -188,8 +188,8 @@ struct cache_fixture
 				}
 				return count;
 			},
-			storage,
-			[](lt::jobqueue_t, lt::aux::disk_job*) {});
+			storage
+		);
 	}
 
 };

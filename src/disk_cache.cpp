@@ -189,43 +189,6 @@ disk_cache::disk_cache(io_context& ios)
 	: m_back_pressure(ios)
 {}
 
-// If the specified piece exists in the cache, and it's unlocked, clear all
-// write jobs (return them in "aborted"). Returns true if the clear_piece
-// job should be posted as complete. Returns false if the piece is locked by
-// another thread, and the clear_piece job has been queued to be issued once
-// the piece is unlocked.
-bool disk_cache::try_clear_piece(piece_location const loc, disk_job* j, jobqueue_t& aborted)
-{
-	std::unique_lock<std::mutex> l(m_mutex);
-
-	INVARIANT_CHECK;
-
-	auto& view = m_pieces.template get<0>();
-	auto i = view.find(loc);
-	if (i == view.end()) return true;
-	if (i->flags & cached_piece_entry::flushing_flag)
-	{
-		// postpone the clearing until we're done flushing
-		view.modify(i, [&](cached_piece_entry& e) { e.clear_piece = j; });
-		return false;
-	}
-
-	// we clear a piece after it fails the hash check. It doesn't make sense
-	// to be hashing still
-	TORRENT_ASSERT(!(i->flags & cached_piece_entry::hashing_flag));
-	if (i->flags & cached_piece_entry::hashing_flag)
-	{
-		// postpone the clearing until we're done hashing
-		view.modify(i, [&](cached_piece_entry& e) { e.clear_piece = j; });
-		return false;
-	}
-
-	view.modify(i, [&](cached_piece_entry& e) {
-		clear_piece_impl(e, aborted);
-	});
-	return true;
-}
-
 // we allow allocating more blocks even after we exceed the max size,
 // but communicate back to the allocator (typically the peer_connection)
 // that we have exceeded the limit via the out-parameter "exceeded". The
@@ -621,12 +584,13 @@ bool disk_cache::kick_pending_hashers(jobqueue_t& completed_jobs, jobqueue_t& re
 }
 
 template <typename Iter, typename View>
-Iter disk_cache::flush_piece_impl(View& view
-	, Iter piece_iter
-	, std::function<int(bitfield&, span<cached_block_entry const>)> const& f
-	, std::unique_lock<std::mutex>& l
-	, span<cached_block_entry> const blocks
-	, std::function<void(jobqueue_t, disk_job*)> clear_piece_fun)
+Iter disk_cache::flush_piece_impl(
+	View& view,
+	Iter piece_iter,
+	std::function<int(bitfield&, span<cached_block_entry const>)> const& f,
+	std::unique_lock<std::mutex>& l,
+	span<cached_block_entry> const blocks
+)
 {
 	TORRENT_ASSERT(l.owns_lock());
 	int const num_blocks = count_jobs(blocks);
@@ -734,16 +698,6 @@ Iter disk_cache::flush_piece_impl(View& view
 	DLOG("flush_piece_impl: piece: %d flushed_cursor: %d force_flush: %d\n"
 		, static_cast<int>(piece_iter->piece.piece), piece_iter->flushed_cursor, bool(piece_iter->flags & cached_piece_entry::force_flush_flag));
 	TORRENT_ASSERT(count <= blocks.size());
-	if (piece_iter->clear_piece)
-	{
-		jobqueue_t aborted;
-		disk_job* clear_piece = nullptr;
-		view.modify(piece_iter, [&](cached_piece_entry& e) {
-			clear_piece_impl(e, aborted);
-			clear_piece = std::exchange(e.clear_piece, nullptr);
-		});
-		clear_piece_fun(std::move(aborted), clear_piece);
-	}
 
 	return next_iter;
 }
@@ -785,10 +739,10 @@ void disk_cache::free_piece(cached_piece_entry const& cpe)
 // be flushed, and already hashed. We don't gain anything from keeping those in
 // the cache.
 void disk_cache::flush_to_disk(
-	std::function<int(bitfield&, span<cached_block_entry const>)> f
-	, int const target_blocks
-	, std::function<void(jobqueue_t, disk_job*)> clear_piece_fun
-	, bool const optimistic)
+	std::function<int(bitfield&, span<cached_block_entry const>)> f,
+	int const target_blocks,
+	bool const optimistic
+)
 {
 	std::unique_lock<std::mutex> l(m_mutex);
 
@@ -830,8 +784,7 @@ void disk_cache::flush_to_disk(
 		}
 		span<cached_block_entry> blocks = piece_iter->get_blocks();
 
-		auto const next_iter = flush_piece_impl(view, piece_iter, f, l
-			, blocks, clear_piece_fun);
+		auto const next_iter = flush_piece_impl(view, piece_iter, f, l, blocks);
 
 		if (piece_iter->flushed_cursor == piece_iter->blocks_in_piece()
 			&& bool(piece_iter->flags & cached_piece_entry::piece_hash_returned_flag)
@@ -875,8 +828,7 @@ void disk_cache::flush_to_disk(
 			piece_iter->flushed_cursor
 			, num_eligible_blocks);
 
-		piece_iter = flush_piece_impl(view2, piece_iter, f, l
-			, blocks, clear_piece_fun);
+		piece_iter = flush_piece_impl(view2, piece_iter, f, l, blocks);
 	}
 
 	// we may still need to flush blocks at this point, even though we
@@ -905,14 +857,13 @@ void disk_cache::flush_to_disk(
 
 		span<cached_block_entry> const blocks = piece_iter->get_blocks();
 
-		piece_iter = flush_piece_impl(view3, piece_iter, f, l
-			, blocks, clear_piece_fun);
+		piece_iter = flush_piece_impl(view3, piece_iter, f, l, blocks);
 	}
 }
 
-void disk_cache::flush_storage(std::function<int(bitfield&, span<cached_block_entry const>)> f
-	, storage_index_t const storage
-	, std::function<void(jobqueue_t, disk_job*)> clear_piece_fun)
+void disk_cache::flush_storage(
+	std::function<int(bitfield&, span<cached_block_entry const>)> f, storage_index_t const storage
+)
 {
 	std::unique_lock<std::mutex> l(m_mutex);
 
@@ -955,7 +906,7 @@ void disk_cache::flush_storage(std::function<int(bitfield&, span<cached_block_en
 		if (num_blocks == 0) continue;
 		span<cached_block_entry> const blocks = piece_iter->get_blocks();
 
-		flush_piece_impl(view, piece_iter, f, l, blocks, clear_piece_fun);
+		flush_piece_impl(view, piece_iter, f, l, blocks);
 		TORRENT_ASSERT(l.owns_lock());
 		TORRENT_ASSERT(!(piece_iter->flags & cached_piece_entry::flushing_flag));
 		TORRENT_ASSERT(!(piece_iter->flags & cached_piece_entry::notify_flushed_flag));
@@ -1083,6 +1034,22 @@ void disk_cache::check_invariant() const
 #endif
 
 // this requires the mutex to be locked
+void disk_cache::clear_piece(piece_location const loc, jobqueue_t& aborted)
+{
+	std::unique_lock<std::mutex> l(m_mutex);
+	INVARIANT_CHECK;
+	auto& view = m_pieces.template get<0>();
+	auto i = view.find(loc);
+	if (i == view.end()) return;
+
+	// must be called under a raised fence on the storage; flushing or
+	// hashing in progress would race with the block-state reset below.
+	TORRENT_ASSERT(!(i->flags & cached_piece_entry::flushing_flag));
+	TORRENT_ASSERT(!(i->flags & cached_piece_entry::hashing_flag));
+
+	view.modify(i, [&](cached_piece_entry& e) { clear_piece_impl(e, aborted); });
+}
+
 void disk_cache::clear_piece_impl(cached_piece_entry& cpe, jobqueue_t& aborted)
 {
 	INVARIANT_CHECK;
